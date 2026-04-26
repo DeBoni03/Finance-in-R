@@ -1,0 +1,1424 @@
+---
+title: "Statistical Methods for Finance"
+author: "Filippo De Boni"
+date: "2026-04-24"
+output: github_document
+---
+
+## Statistical Methods for Finance - Returns and Volatility Analysis
+
+Prices, returns and volatility analysis for NVIDIA-daily, NVIDIA-monthly and Amplifon-daily.
+
+```{r, message=FALSE, warning=FALSE}
+rm(list=ls())
+library(readxl)
+library(quantmod)
+library(astsa)
+library(tidyverse)
+library(fImport)
+library(fBasics)
+library(fUnitRoots)
+library(timeSeries)
+library(forecast)
+library(tseries)
+library(rugarch)
+library(roll)
+library(distr)
+library(FinTS)
+library(sandwich)
+source("dm_test.R")
+```
+
+## NVIDIA - daily
+
+### Prices, log-prices
+
+Refinitiv data from the 4th of January 2010 to the 29th of December 2023.
+
+```{r}
+data=read_excel("nvidia giornalieri.xlsx",skip = 27)
+```
+
+Prices and log-prices. Exploration of the series characteristics. Looking at quartiles from BasicStats' output looks like the log transformation reduces skewness and peaks.
+
+```{r}
+P=data$Close
+P=P[length(P):1]#Reversing series
+p=log(P)
+BS=basicStats(cbind(P,p))
+BS
+par(mfrow=c(1,2))
+tsplot(P,xlab="Time",ylab="Prices",main="NVIDIA - PRICES")
+tsplot(p,xlab="Time",ylab="Log-Prices",main="NVIDIA - LOG-PRICES")
+```
+
+ACF/PACF analysis. The plots evidently suggest the presence of a RW stochastic process for both Prices and Log-prices series. ACF show values close to 1 consistently at least until 21 lags; PACF show values close to 1 at the first lag and non-significant values for the remaining ones.
+
+```{r}
+par(mfrow=c(2,2))
+acf.P=acf(P,lag.max = 21)
+pacf.P=pacf(P,lag.max=21)
+acf.p=acf(p,lag.max=21)
+pacf.p=pacf(p,lag.max=21)
+acf.P[21]
+pacf.P[1]
+acf.p[21]
+pacf.p[1]
+```
+
+Augmented Dickey-Fuller tests for unit roots and Ljung-Box on residuals. Log-prices show unit roots, differenced log-prices don't; residuals however are correlated: RW is not confirmed. Let's keep this in mind.
+
+```{r}
+adf1=adfTest(p,lags=21,type="ct")
+summary(adf1@test$lm)
+adf1=adfTest(p,lags=9,type="ct")
+summary(adf1@test$lm)
+#Keeping lags until the ninth: for this particular lag, significance is dubious considering 21 lags, but considering 9 lags significance is confirmed. Significant trend and intercept.
+
+adf1
+#Fail to reject H0: log-prices do have at least one unit root. Repeating the procedure on differenced series to verify the presence of other unit roots.
+
+dp=diff(p)
+adf2=adfTest(dp,lags=21,type="ct")
+summary(adf2@test$lm)#It's safe to keep 21 lags but not to keep trend.
+adf2=adfTest(dp,lags=21,type="c")
+summary(adf2@test$lm)
+
+adf2
+#Reject H0: RW confirmed if residuals show compatibility with WN.
+
+par(mfrow=c(1,2))
+acf(dp,lag.max=21)
+pacf(dp,lag.max=21)
+Box.test(dp,lag=21,type="Ljung-Box")
+#ACF and PACF plots are compatible with WN; however Ljung-Box rejects H0. RW is not confirmed, the analysis continues keeping this in mind.
+```
+
+### Log-returns
+
+Exploratory analysis. BasicStats shows slight skewness to the left (unusual case with positive returns more frequent than negative ones) and high kurtosis (leptokurtosis). Evident volatility clustering and stationarity around 0 (as expected). QQ plot doesn't suggest normality, as does the density plot, especially in the tails, accordingly to the test.
+
+```{r}
+r=dp
+BS.2=as.matrix(basicStats(r))
+BS.2
+
+par(mfrow=c(1,3))
+tsplot(r,xlab="Time",ylab="Log-returns", main="NVIDIA - LOG-RETURNS")
+x=seq(min(r),max(r),length=50)
+y=dnorm(x,mean=mean(r),sd=sd(r))
+hist(r,breaks=100,freq=F,main="NVIDIA's returns")
+lines(x,y,col=2,lwd=2)
+qqnorm(r,main="Normal Q-Q Plot",xlab="Theoretical",ylab="Empirical")
+qqline(r,col="steelblue", lwd=2)
+jarqueberaTest(r)
+```
+
+Plots show ACF and PACF of the log-returns, their squared values and their absolute values, and suggest the presence of some form of non-linear serial dependence. No clear stochastic processes are evidently suggested by the plots, therefore some ARMA processes are estimated and then evaluated.
+
+```{r}
+par(mfrow=c(2,3))
+r2=r^2
+r.abs=abs(r)
+acf(r,lag.max=21)
+acf(r2,lag.max = 21)
+acf(r.abs,lag.max=21)
+pacf(r,lag.max=21)
+pacf(r2,lag.max=21)
+pacf(r.abs,lag.max=21)
+```
+
+ACF plots look the same, so the choice is based on significance of the coefficients and AIC. AR(1) is selected and compared in the following analysis with the null model.
+
+```{r}
+ar.int=arma(r,order=c(1,0))
+ar=arma(r,order=c(1,0),include.intercept = F)
+ma.int=arma(r,order=c(0,1))
+ma=arma(r,order=c(0,1),include.intercept = F)
+arma.int=arma(r,order=c(1,1))
+arma=arma(r,order=c(1,1),include.intercept = F)
+par(mfrow=c(2,3))
+acf(na.omit(ar.int$residuals), lag.max=21)
+acf(na.omit(ar$residuals), lag.max=21)
+acf(na.omit(ma.int$residuals), lag.max=21)
+acf(na.omit(ma$residuals), lag.max=21)
+acf(na.omit(arma.int$residuals), lag.max=21)
+acf(na.omit(arma$residuals), lag.max=21)
+
+summary(ar.int)
+summary(ar)
+summary(ma.int)
+summary(ma)
+summary(arma.int)
+summary(arma)
+
+mod.arma=ar
+mod.mean=arma(r,order=c(0,0))
+summary(mod.mean)
+par(mfrow=c(1,2))
+acf(mod.mean$residuals,lag.max=21)
+pacf(mod.mean$residuals,lag.max=21)
+```
+
+Static and dynamic forecast.
+
+```{r}
+test.size=250
+train.size=length(r)-250
+test=tail(r,test.size)
+train=head(r,train.size)
+for (i in 1:test.size){
+  if (i==1){
+    new.train=train
+    p.mean=p.ar=c(rep(NA,250))
+    mod.mean=Arima(train,order=c(0,0,0),include.mean = T)
+    mod.arma=Arima(train,order=c(1,0,0),include.mean = F)
+  }
+  else{
+    new.train=c(new.train, test[i-1])
+  }
+  mod.mean.stat=Arima(new.train,model=mod.mean)
+  mod.arma.stat=Arima(new.train,model=mod.arma)
+  p.mean[i]=forecast(mod.mean.stat,h=1)$mean
+  p.ar[i]=forecast(mod.arma.stat,h=1)$mean
+}
+
+test.size=250
+train.size=length(r)-250
+test=tail(r,test.size)
+train=head(r,train.size)
+for (i in 1:test.size){
+  if (i==1){
+    new.train=train
+    p.ar.2=c(rep(NA,250))
+    mod.arma=Arima(train,order=c(1,0,0),include.mean = F)
+  }
+  else{
+    new.train=as.vector(new.train)
+    new.train=c(new.train, p.ar.2[i-1])
+  }
+  mod.arma.din=Arima(new.train,model=mod.arma)
+  p.ar.2[i]=forecast(mod.arma.din,h=1)$mean
+}
+```
+
+As expected (by model metrics and usual characteristics of returns time series) the model doesn't perform well in forecasting, errors look similar to the ones of the intercept model. Diebold-Mariano shows that the intercept model gives the best predictions.
+
+```{r}
+par(mfrow=c(1,1)) 
+ts.plot(ts(test),ts(p.mean),ts(p.ar),ts(p.ar.2),col=1:3,main="Forecasts comparison") 
+legend("topleft",legend=c("Actual returns","Forecasts mean model","Forecasts AR(1) (static)","Forecasts AR(1) (dynamic)"),col=1:4,lty = 1,  cex=0.70) 
+err.mean=test-p.mean 
+err.ar=test-p.ar 
+err.ar.2=test-p.ar.2
+MSE.mean=mean(err.mean^2) 
+MSE.ar=mean(err.ar^2) 
+MSE.ar.2=mean(err.ar.2^2) 
+MSE.mean 
+MSE.ar 
+MSE.ar.2 
+p1=dm_test(err.ar,err.mean,alternative = "greater",h=1)$p.value
+p2=dm_test(err.ar,err.ar.2,alternative = "greater",h=1)$p.value
+p3=dm_test(err.ar.2,err.mean,alternative = "greater",h=1)$p.value
+p.adjust(c(p1,p2,p3),"holm")
+```
+
+### Volatility
+
+Returns' series doesn't appear homoscedastic: peaks and effects on variance are visible in the following plots. Possible serial dependence on absolute returns' plot.
+
+```{r}
+par(mfrow=c(3,1))
+tsplot(r,main="NVIDIA's daily returns")
+tsplot(abs(r),main="Absolute returns")
+tsplot(r^2, main="Squared returns")#Proxy of variance, since mean(r)~0
+var62=roll_var(r,width=62,center=T)
+var126=roll_var(r,width=126,center=T)
+par(mfrow=c(2,1))
+tsplot(var62,main="Rolling variance with 62 obs window")
+tsplot(var126,main="Rolling variance with 126 obs window")
+```
+
+H0 is rejected for both LM and Ljung-Box. ARCH effects are confirmed.
+
+```{r}
+ArchTest(r,lags=1)
+ArchTest(r,lags=5)
+ArchTest(r,lags=10)
+Box.test(as.numeric(r^2),lag=5,type ="Ljung-Box")
+Box.test(as.numeric(r^2),lag=10,type="Ljung-Box")
+```
+
+Fitting a GARCH(1,1) as starting model, with both normal and skewed t-Student distribution of innovations.
+
+Normal model:
+
+Optimal coefficients entirely significant and variance's intercept non significant for robust estimates of coefficients' standard deviation in the normal model. Absence of ARCH effects among residuals. Stability over time for the model's coefficients. Symmetry rejected. Low goodness of fit for normal distribution on innovations.
+
+Sstd model:
+
+Non-significant variance intercept. Absence of ARCH effects among residuals. Coefficients are unstable. Asymmetry is correctly addressed by sstd, showing a good fit.
+
+```{r}
+r1=r[1:3270]
+r2=r[3271:3521]
+spec1=ugarchspec(variance.model=list(model="sGARCH",garchOrder=c(1,1)),mean.model = list(armaOrder=c(0,0),include.mean=T),distribution.model = "norm")
+spec2=ugarchspec(variance.model=list(model="sGARCH",garchOrder=c(1,1)),mean.model = list(armaOrder=c(0,0),include.mean=T),distribution.model = "sstd")
+garch11.norm=ugarchfit(spec1,r1)
+garch11.sstd=ugarchfit(spec2,r1)
+show(garch11.norm)
+show(garch11.sstd)
+```
+
+Standardized residuals' analysis. Similar results, sstd fits the data better than normal distribution.
+
+```{r}
+resst.garch11.norm=residuals(garch11.norm,standardize=T)
+resst.garch11.sstd=residuals(garch11.sstd,standardize=T)
+par(mfrow=c(2,1))
+plot(resst.garch11.norm,main="Standardized residuals' analysis - Normal model")
+plot(resst.garch11.sstd,main="Standardized residuals' analysis - Sstd model")
+par(mfrow=c(2,1))
+plot(garch11.norm,which=8)
+plot(garch11.norm,which=9)
+par(mfrow=c(2,1))
+plot(garch11.sstd,which=8)
+plot(garch11.sstd,which=9)
+par(mfrow=c(2,2))
+plot(garch11.norm,which=10)
+plot(garch11.norm,which=11)
+plot(garch11.sstd,which=10)
+plot(garch11.sstd,which=11)
+```
+
+Fitting the GJR-GARCH and E-GARCH models to capture returns' asymmetrical response to shocks.
+
+GJR-GARCH:
+
+Dubious significance for variance's intercept. Fail to reject absence of ARCH effects among residuals. Unstable coefficients. Absence of residual asymmetry. Satisfying goodness of fit for sstd.
+
+E-GARCH:
+
+Significant coefficients. No residual ARCH effects. Unstable coefficients. Dubious goodness of fit for sstd.
+
+```{r}
+spec3=ugarchspec(variance.model=list(model="gjrGARCH",garchOrder=c(1,1)),mean.model = list(armaOrder=c(0,0),include.mean=T),distribution.model = "sstd")
+spec4=ugarchspec(variance.model=list(model="eGARCH",garchOrder=c(1,1)),mean.model = list(armaOrder=c(0,0),include.mean=T),distribution.model = "sstd")
+#mu is not significant
+gjrgarch11.sstd=ugarchfit(spec3,r1)
+egarch11.sstd=ugarchfit(spec4,r1)
+show(gjrgarch11.sstd)
+show(egarch11.sstd)
+```
+
+Standardized residuals' analysis. Similar results.
+
+```{r}
+resst.gjrgarch11.sstd=residuals(gjrgarch11.sstd,standardize=T)
+resst.egarch11.sstd=residuals(egarch11.sstd,standardize=T)
+par(mfrow=c(2,1))
+plot(resst.gjrgarch11.sstd,main="Standardized residuals' analysis - Normal model")
+plot(resst.egarch11.sstd,main="Standardized residuals' analysis - Sstd model")
+par(mfrow=c(2,1))
+plot(gjrgarch11.sstd,which=8)
+plot(gjrgarch11.sstd,which=9)
+par(mfrow=c(2,1))
+plot(egarch11.sstd,which=8)
+plot(egarch11.sstd,which=9)
+par(mfrow=c(2,2))
+plot(gjrgarch11.sstd,which=10)
+plot(gjrgarch11.sstd,which=11)
+plot(egarch11.sstd,which=10)
+plot(egarch11.sstd,which=11)
+```
+
+Similar fitted values for sigma, the bigger differences between plots sits in the "sharpness" and height of peaks. Volatility clustering is correctly recognized.
+
+```{r}
+sigma1=sigma(garch11.norm)
+sigma2=sigma(garch11.sstd)
+sigma3=sigma(egarch11.sstd)
+sigma4=sigma(gjrgarch11.sstd)
+par(mfrow=c(2,2))
+plot(sigma1,main="GARCH(1,1) norm")
+plot(sigma2,main="GARCH(1,1) sstd")
+plot(sigma3,main="EGARCH(1,1) sstd")
+plot(sigma4,main="GJR-GARCH(1,1) sstd")
+```
+
+Information Criteria. The first model shows the poorest results in information criteria, whereas the third one shows the best ones.
+
+```{r}
+AIC=c(infocriteria(garch11.norm)[1],infocriteria(garch11.sstd)[1],infocriteria(egarch11.sstd)[1],infocriteria(gjrgarch11.sstd)[1])
+BIC=c(infocriteria(garch11.norm)[2],infocriteria(garch11.sstd)[2],infocriteria(egarch11.sstd)[2],infocriteria(gjrgarch11.sstd)[2])
+SHI=c(infocriteria(garch11.norm)[3],infocriteria(garch11.sstd)[3],infocriteria(egarch11.sstd)[3],infocriteria(gjrgarch11.sstd)[3])
+HQC=c(infocriteria(garch11.norm)[4],infocriteria(garch11.sstd)[4],infocriteria(egarch11.sstd)[4],infocriteria(gjrgarch11.sstd)[4])
+
+par(mfrow=c(2,2))
+plot(AIC)
+plot(BIC)
+plot(SHI)
+plot(HQC)
+
+```
+
+Log-likelihood evaluation. Results compatible with previous analysis.
+
+```{r}
+loglik=c(garch11.norm@fit$LLH,garch11.sstd@fit$LLH,egarch11.sstd@fit$LLH,gjrgarch11.sstd@fit$LLH)
+par(mfrow=c(1,1))
+plot(loglik)
+```
+
+Static and dynamic forecasts.
+
+```{r}
+for1=ugarchroll(spec1,data=r1,forecast.length = length(r2),refit.every = 5)
+for2=ugarchroll(spec2,data=r1,forecast.length = length(r2),refit.every = 5)
+for3=ugarchroll(spec3,data=r1,forecast.length = length(r2),refit.every = 5)
+for4=ugarchroll(spec4,data=r1,forecast.length = length(r2),refit.every = 5)
+forec=cbind("GARCH(1,1) norm"=as.data.frame(for1)$Sigma,"GARCH(1,1) sstd"=as.data.frame(for2)$Sigma,"E-GARCH(1,1) sstd"=as.data.frame(for3)$Sigma,"GJR-GARCH(1,1) sstd"=as.data.frame(for4)$Sigma)
+plot(ts(forec),main="Static Forecasts")
+for5=ugarchforecast(garch11.norm,data=r1,n.ahead = length(r2))
+for6=ugarchforecast(garch11.sstd,data=r1,n.ahead = length(r2))
+for7=ugarchforecast(egarch11.sstd,data=r1,n.ahead = length(r2))
+for8=ugarchforecast(gjrgarch11.sstd,data=r1,n.ahead = length(r2))
+forec2=cbind("GARCH(1,1) norm"=for5@forecast$sigmaFor,"GARCH(1,1) sstd"=for6@forecast$sigmaFor,"E-GARCH(1,1) sstd"=for7@forecast$sigmaFor,"GJR-GARCH(1,1) sstd"=for8@forecast$sigmaFor)
+plot(ts(forec2),main="Dynamic Forecasts")
+```
+
+Visualization.
+
+```{r}
+par(mfrow=c(2,2))
+plot(for1,which=1)
+plot(for2,which=1)
+plot(for3,which=1)
+plot(for4,which=1)
+par(mfrow=c(2,2))
+plot(for1,which=2)
+plot(for2,which=2)
+plot(for3,which=2)
+plot(for4,which=2)
+par(mfrow=c(2,2))
+plot(for1,which=3)
+plot(for2,which=3)
+plot(for3,which=3)
+plot(for4,which=3)
+plot(for1,which=5)
+plot(for2,which=5)
+plot(for3,which=5)
+plot(for4,which=5)
+plot(for5,which=1)
+plot(for6,which=1)
+plot(for7,which=1)
+plot(for8,which=1)
+plot(for5,which=3)
+plot(for6,which=3)
+plot(for7,which=3)
+plot(for8,which=3)
+```
+
+Forecast errors analysis. GARCH norm shows best results for static forecasts.
+
+```{r}
+err1=as.data.frame(for1)$Sigma^2-r2^2
+err2=as.data.frame(for2)$Sigma^2-r2^2
+err3=as.data.frame(for3)$Sigma^2-r2^2
+err4=as.data.frame(for4)$Sigma^2-r2^2
+ERR=cbind("GARCH(1,1) norm"=err1,"GARCH(1,1) sstd"=err2,"E-GARCH(1,1) sstd"=err3,"GJR-GARCH(1,1) sstd"=err4)
+plot(ts(ERR),main="Forcecast's errors")
+err.ind=matrix(nrow=3,ncol=4)
+colnames(err.ind)=c("GARCH norm","GARCH sstd", "E-GARCH sstd", "GJR-GARCH sstd")
+row.names(err.ind)=c("MSE","RMSE","MAE")
+err.ind[,1]=c(mean(err1^2),sqrt(mean(err1^2)),mean(abs(err1)))
+err.ind[,2]=c(mean(err2^2),sqrt(mean(err2^2)),mean(abs(err2)))
+err.ind[,3]=c(mean(err3^2),sqrt(mean(err3^2)),mean(abs(err3)))
+err.ind[,4]=c(mean(err4^2),sqrt(mean(err4^2)),mean(abs(err4)))
+err.ind
+
+err5=for5@forecast$sigmaFor^2-r2^2
+err6=for6@forecast$sigmaFor^2-r2^2
+err7=for7@forecast$sigmaFor^2-r2^2
+err8=for8@forecast$sigmaFor^2-r2^2
+ERR2=cbind("GARCH(1,1) norm"=err5,"GARCH(1,1) sstd"=err6,"E-GARCH(1,1) sstd"=err7,"GJR-GARCH(1,1) sstd"=err8)
+plot(ts(ERR2),main="Forcecast's errors")
+err.ind2=matrix(nrow=3,ncol=4)
+colnames(err.ind2)=c("GARCH norm","GARCH sstd", "E-GARCH sstd", "GJR-GARCH sstd")
+row.names(err.ind2)=c("MSE","RMSE","MAE")
+err.ind2[,1]=c(mean(err5^2),sqrt(mean(err5^2)),mean(abs(err5)))
+err.ind2[,2]=c(mean(err6^2),sqrt(mean(err6^2)),mean(abs(err6)))
+err.ind2[,3]=c(mean(err7^2),sqrt(mean(err7^2)),mean(abs(err7)))
+err.ind2[,4]=c(mean(err8^2),sqrt(mean(err8^2)),mean(abs(err8)))
+err.ind2
+```
+
+Diebold-Mariano. GARCH shows significantly lower error rates (in comparison with alternatives) in static forecasts. EGARCH and GARCH norm show significantly more accurate forecasts when compared to the alternatives.
+
+```{r}
+i=j=1
+DM=matrix(nrow=4,ncol=4)
+for (l in 1:16){
+  if (i==j) {
+    DM[l]=NA
+    i=i+1
+  }
+  else {
+    DM[l]=dm_test(ERR[,i],ERR[,j],alternative = "greater",power = 1,varestimator = "NeweyWest")$p.value
+    if (i==4){
+      i=1
+      j=j+1
+    }
+    else{
+      i=i+1
+    }
+  }
+}
+DM
+
+i=j=1
+DM=matrix(nrow=4,ncol=4)
+for (l in 1:16){
+  if (i==j) {
+    DM[l]=NA
+    i=i+1
+  }
+  else {
+    DM[l]=dm_test(ERR2[,i],ERR2[,j],alternative = "greater",power = 1,varestimator = "NeweyWest")$p.value
+    if (i==4){
+      i=1
+      j=j+1
+    }
+    else{
+      i=i+1
+    }
+  }
+}
+DM
+```
+
+## NVIDIA - monthly
+
+### Prices, log-prices
+
+Refinitiv data from the 31st of January 2010 to the 31st of December 2023.
+
+```{r}
+data=read_excel("nvidia mensili.xlsx",skip = 31)
+```
+
+Prices and log-prices. Exploration of the series characteristics. Looking at quartiles from the BasicStats' output looks like the log transformation reduced skewness, peaks and kurtosis. CI on mean appears wider than the one calculated for daily prices, likely for sample sizes.
+
+```{r}
+P=data$Close
+P=P[length(P):1]#Reversing series
+p=log(P)
+BS=basicStats(cbind(P,p))
+BS
+par(mfrow=c(1,2))
+tsplot(P,xlab="Time",ylab="Prices",main="NVIDIA - PRICES")
+tsplot(p,xlab="Time",ylab="Log-Prices",main="NVIDIA - LOG-PRICES")
+```
+
+ACF/PACF analysis. The plots suggest the presence of a RW.
+
+```{r}
+par(mfrow=c(2,2))
+acf.P=acf(P,lag.max = 12)
+pacf.P=pacf(P,lag.max=12)
+acf.p=acf(p,lag.max=12)
+pacf.p=pacf(p,lag.max=12)
+pacf.P[1]
+```
+
+Augmented Dickey-Fuller tests for unit roots and Ljung-Box on residuals. Presence of one unit root and residuals' absence of correlation confirmed: RW is confirmed.
+
+```{r}
+adf1=adfTest(p,lags=12,type="ct")
+summary(adf1@test$lm)
+#Starting point: 12 lags (monthly series). 12th lag isn't significant.
+adf1=adfTest(p,lags=11,type="ct")
+summary(adf1@test$lm)
+adf1=adfTest(p,lags=10,type="ct")
+summary(adf1@test$lm)
+adf1=adfTest(p,lags=9,type="ct")
+summary(adf1@test$lm)
+adf1=adfTest(p,lags=8,type="ct")
+summary(adf1@test$lm)
+adf1=adfTest(p,lags=7,type="ct")
+summary(adf1@test$lm)
+adf1=adfTest(p,lags=6,type="ct")
+summary(adf1@test$lm)
+adf1=adfTest(p,lags=5,type="ct")
+summary(adf1@test$lm)
+adf1=adfTest(p,lags=4,type="ct")
+summary(adf1@test$lm)
+#4 significant lags, trend and intercept are significant too.
+
+adf1
+#Fail to reject H0: at least one unit root.
+
+dp=diff(p)
+adf2=adfTest(dp,lags=12,type="ct")
+summary(adf2@test$lm)
+adf2=adfTest(dp,lags=11,type="ct")
+summary(adf2@test$lm)
+adf2=adfTest(dp,lags=10,type="ct")
+summary(adf2@test$lm)
+adf2=adfTest(dp,lags=9,type="ct")
+summary(adf2@test$lm)
+adf2=adfTest(dp,lags=8,type="ct")
+summary(adf2@test$lm)
+adf2=adfTest(dp,lags=7,type="ct")
+summary(adf2@test$lm)
+adf2=adfTest(dp,lags=6,type="ct")
+summary(adf2@test$lm)
+adf2=adfTest(dp,lags=5,type="ct")
+summary(adf2@test$lm)
+adf2=adfTest(dp,lags=4,type="ct")
+summary(adf2@test$lm)
+adf2=adfTest(dp,lags=3,type="ct")
+summary(adf2@test$lm)
+adf2=adfTest(dp,lags=2,type="ct")
+summary(adf2@test$lm)
+adf2=adfTest(dp,lags=1,type="ct")
+summary(adf2@test$lm)
+#0 significant lags.
+
+adf2=adfTest(dp,lags=0,type="ct")
+summary(adf2@test$lm)
+#Trend is not significant too.
+
+adf2=adfTest(dp,lags=0,type="c")
+summary(adf2@test$lm)
+adf2
+#Significant intercept. Test for second unit roots rejected.
+
+par(mfrow=c(1,2))
+acf(dp,lag.max=12)
+pacf(dp,lag.max=12)
+Box.test(dp,lag=12,type="Ljung-Box")
+#Fail to reject absence of correlation between residuals, for which WN is confirmed. RW confirmed.
+```
+
+### Log-returns
+
+Exploratory analysis. BasicStats shows slight skewness to the right, lower kurtosis and increased variance when compared to the daily prices' case. Evident volatility clustering and stationarity around 0 (as expected). QQ plot and test don't suggest normality, as does the density plot, especially in the tails.
+
+```{r}
+r=dp
+BS.2=as.matrix(basicStats(r))
+BS.2
+
+par(mfrow=c(1,3))
+tsplot(r,xlab="Time",ylab="Log-returns", main="NVIDIA - LOG-RETURNS")
+x=seq(min(r),max(r),length=50)
+y=dnorm(x,mean=mean(r),sd=sd(r))
+hist(r,breaks=100,freq=F,main="NVIDIA's returns")
+lines(x,y,col=2,lwd=2)
+qqnorm(r,main="Normal Q-Q Plot",xlab="Theoretical",ylab="Empirical")
+qqline(r,col="steelblue", lwd=2)
+jarqueberaTest(r)
+```
+
+Plots show ACF and PACF of the log-returns, their squared values and their absolute values, and suggest slight serial dependence at higher moments.
+
+```{r}
+par(mfrow=c(2,3))
+r2=r^2
+r.abs=abs(r)
+acf(r,lag.max=12)
+acf(r2,lag.max = 12)
+acf(r.abs,lag.max=12)
+pacf(r,lag.max=12)
+pacf(r2,lag.max=12)
+pacf(r.abs,lag.max=12)
+```
+
+ACF plots already show a WN, an ARMA model is estimated anyway. The best AIC is brought by MA(1) without intercept, which has a coefficient with dubious significance. By sacrificing 0.01 AIC value, coefficient's p-value improves (by choosing an AR(1) without intercept). This model will be compared with the null model.
+
+```{r}
+ar1.int=arma(r,order=c(1,0))
+ar1=arma(r,order=c(1,0),include.intercept = F)
+ma1.int=arma(r,order=c(0,1))
+ma1=arma(r,order=c(0,1),include.intercept = F)
+arma11.int=arma(r,order=c(1,1))
+arma11=arma(r,order=c(1,1),include.intercept = F)
+par(mfrow=c(2,3))
+acf(na.omit(ar1.int$residuals), lag.max=12)
+acf(na.omit(ar1$residuals), lag.max=12)
+acf(na.omit(ma1.int$residuals), lag.max=12)
+acf(na.omit(ma1$residuals), lag.max=12)
+acf(na.omit(arma11.int$residuals), lag.max=12)
+acf(na.omit(arma11$residuals), lag.max=12)
+
+summary(ar1.int)
+summary(ar1)
+summary(ma1.int)
+summary(ma1)
+summary(arma11.int)
+summary(arma11)
+
+mod.arma=ar1
+mod.mean=arma(r,order=c(0,0,0),include.intercept = T)
+summary(mod.mean)
+par(mfrow=c(1,2))
+acf(mod.mean$residuals,lag.max=12)
+pacf(mod.mean$residuals,lag.max=12)
+```
+
+Static and dynamic forecast.
+
+```{r}
+test.size=12
+train.size=length(r)-12
+test=tail(r,test.size)
+train=head(r,train.size)
+for (i in 1:test.size){
+  if (i==1){
+    new.train=train
+    p.mean=p.ar=c(rep(NA,12))
+    mod.mean=Arima(train,order=c(0,0,0),include.mean = T)
+    mod.arma=Arima(train,order=c(1,0,0),include.mean = F)
+  }
+  else{
+    new.train=c(new.train, test[i-1])
+  }
+  mod.mean.stat=Arima(new.train,model=mod.mean)
+  mod.arma.stat=Arima(new.train,model=mod.arma)
+  p.mean[i]=forecast(mod.mean.stat,h=1)$mean
+  p.ar[i]=forecast(mod.arma.stat,h=1)$mean
+}
+
+test.size=12
+train.size=length(r)-12
+test=tail(r,test.size)
+train=head(r,train.size)
+for (i in 1:test.size){
+  if (i==1){
+    new.train=train
+    p.ar.2=c(rep(NA,12))
+    mod.arma=Arima(train,order=c(1,0,0),include.mean = F)
+  }
+  else{
+    new.train=as.vector(new.train)
+    new.train=c(new.train, p.ar.2[i-1])
+  }
+  mod.arma.din=Arima(new.train,model=mod.arma)
+  p.ar.2[i]=forecast(mod.arma.din,h=1)$mean
+}
+```
+
+As expected (by model metrics and usual characteristics of returns time series) the model doesn't perform well in forecasting, errors look similar to the ones of the intercept model. Diebold-Mariano confirms homogeneity of errors between models.
+
+```{r}
+par(mfrow=c(1,1)) 
+ts.plot(ts(test),ts(p.mean),ts(p.ar),ts(p.ar.2),col=1:4,main="Forecasts comparison") 
+legend("topleft",legend=c("Actual returns","Forecasts mean model","Forecasts AR(1) (static)","Forecasts AR(1) (dynamic)"),col=1:4,lty = 1,  cex=0.70) 
+err.mean=test-p.mean 
+err.ar=test-p.ar 
+err.ar.2=test-p.ar.2
+MSE.mean=mean(err.mean^2) 
+MSE.ar=mean(err.ar^2) 
+MSE.ar.2=mean(err.ar.2^2) 
+MSE.mean 
+MSE.ar 
+MSE.ar.2 
+p1=dm_test(err.ar,err.mean,alternative = "greater",h=1)$p.value
+p2=dm_test(err.ar,err.ar.2,alternative = "less",h=1)$p.value
+p3=dm_test(err.ar.2,err.mean,alternative = "greater",h=1)$p.value
+p.adjust(c(p1,p2,p3),"holm")
+```
+
+### Volatility
+
+Returns' series doesn't appear homoscedastic: peaks and effects on variance are visible in the following plots.
+
+```{r}
+par(mfrow=c(3,1))
+tsplot(r,main="NVIDIA's monthly returns")
+tsplot(abs(r),main="Absolute returns")
+tsplot(r^2, main="Squared returns")#Proxy of variance, since mean(r)~0
+var5=roll_var(r,width=5,center=T)
+var10=roll_var(r,width=10,center=T)
+par(mfrow=c(2,1))
+tsplot(var5,main="Rolling variance with 5 obs window")
+tsplot(var10,main="Rolling variance with 10 obs window")
+```
+
+No ARCH effects according to the LM test. Autocorrelation between squared returns. Exploratory estimation of a GARCH model anyway.
+
+```{r}
+ArchTest(r,lags=1)
+ArchTest(r,lags=5)
+ArchTest(r,lags=10)
+Box.test(as.numeric(r^2),lag=5,type ="Ljung-Box")
+Box.test(as.numeric(r^2),lag=10,type="Ljung-Box")
+```
+
+Fitting a GARCH(1,1) as starting model, with both normal and t-Student distribution of innovations.
+
+Normal model:
+
+Baseline variance's coefficient is non-significant. Absence of ARCH effects among residuals. Stable coefficients. Satisfying goodness of fit.
+
+Std model:
+
+Similar results.
+
+The models look statisfying; no more models to be fitted.
+
+```{r}
+r1=r[1:155]
+r2=r[156:167]
+spec1=ugarchspec(variance.model=list(model="sGARCH",garchOrder=c(1,1)),mean.model = list(armaOrder=c(0,0),include.mean=T),distribution.model = "norm")
+spec2=ugarchspec(variance.model=list(model="sGARCH",garchOrder=c(1,1)),mean.model = list(armaOrder=c(0,0),include.mean=T),distribution.model = "std")
+garch11.norm=ugarchfit(spec1,r1)
+garch11.sstd=ugarchfit(spec2,r1)
+show(garch11.norm)
+show(garch11.sstd)
+```
+
+Standardized residuals' analysis. Similar results, std fits the data better than normal distribution.
+
+```{r}
+resst.garch11.norm=residuals(garch11.norm,standardize=T)
+resst.garch11.sstd=residuals(garch11.sstd,standardize=T)
+par(mfrow=c(2,1))
+plot(resst.garch11.norm,main="Standardized residuals' analysis - Normal model")
+plot(resst.garch11.sstd,main="Standardized residuals' analysis - Sstd model")
+par(mfrow=c(2,1))
+plot(garch11.norm,which=8)
+plot(garch11.norm,which=9)
+par(mfrow=c(2,1))
+plot(garch11.sstd,which=8)
+plot(garch11.sstd,which=9)
+par(mfrow=c(2,2))
+plot(garch11.norm,which=10)
+plot(garch11.norm,which=11)
+plot(garch11.sstd,which=10)
+plot(garch11.sstd,which=11)
+```
+
+Similar fitted values for sigma. Volatility clustering is correctly recognized.
+
+```{r}
+sigma1=sigma(garch11.norm)
+sigma2=sigma(garch11.sstd)
+par(mfrow=c(2,1))
+plot(sigma1,main="GARCH(1,1) norm")
+plot(sigma2,main="GARCH(1,1) std")
+```
+
+Information Criteria. No clear results.
+
+```{r}
+AIC=c(infocriteria(garch11.norm)[1],infocriteria(garch11.sstd)[1])
+BIC=c(infocriteria(garch11.norm)[2],infocriteria(garch11.sstd)[2])
+SHI=c(infocriteria(garch11.norm)[3],infocriteria(garch11.sstd)[3])
+HQC=c(infocriteria(garch11.norm)[4],infocriteria(garch11.sstd)[4])
+
+par(mfrow=c(2,2))
+plot(AIC)
+plot(BIC)
+plot(SHI)
+plot(HQC)
+
+```
+
+Log-likelihood evaluation. Better results for std model.
+
+```{r}
+loglik=c(garch11.norm@fit$LLH,garch11.sstd@fit$LLH)
+par(mfrow=c(1,1))
+plot(loglik)
+```
+
+Static and dynamic forecasts. Results look completely different across different forecast approaches. The errors evaluation will clarify which model better represents the data.
+
+```{r}
+for1=ugarchroll(spec1,data=r1,forecast.length = length(r2),refit.every = 5)
+for2=ugarchroll(spec2,data=r1,forecast.length = length(r2),refit.every = 5)
+forec=cbind("GARCH(1,1) norm"=as.data.frame(for1)$Sigma,"GARCH(1,1) std"=as.data.frame(for2)$Sigma)
+plot(ts(forec),main="Static Forecasts")
+for3=ugarchforecast(garch11.norm,data=r1,n.ahead = length(r2))
+for4=ugarchforecast(garch11.sstd,data=r1,n.ahead = length(r2))
+forec2=cbind("GARCH(1,1) norm"=for3@forecast$sigmaFor,"GARCH(1,1) std"=for4@forecast$sigmaFor)
+plot(ts(forec2),main="Dynamic Forecasts")
+```
+
+Visualization.
+
+```{r}
+par(mfrow=c(2,1))
+plot(for1,which=1)
+plot(for2,which=1)
+par(mfrow=c(2,1))
+plot(for1,which=2)
+plot(for2,which=2)
+par(mfrow=c(2,1))
+plot(for1,which=3)
+plot(for2,which=3)
+plot(for1,which=5)
+plot(for2,which=5)
+plot(for3,which=1)
+plot(for4,which=1)
+plot(for3,which=3)
+plot(for4,which=3)
+```
+
+Forecast errors analysis. GARCH std shows better results.
+
+```{r}
+err1=as.data.frame(for1)$Sigma^2-r2^2
+err2=as.data.frame(for2)$Sigma^2-r2^2
+ERR=cbind("GARCH(1,1) norm"=err1,"GARCH(1,1) std"=err2)
+plot(ts(ERR),main="Forcecast's errors")
+err.ind=matrix(nrow=3,ncol=2)
+colnames(err.ind)=c("GARCH norm","GARCH std")
+row.names(err.ind)=c("MSE","RMSE","MAE")
+err.ind[,1]=c(mean(err1^2),sqrt(mean(err1^2)),mean(abs(err1)))
+err.ind[,2]=c(mean(err2^2),sqrt(mean(err2^2)),mean(abs(err2)))
+err.ind
+
+err3=for3@forecast$sigmaFor^2-r2^2
+err4=for4@forecast$sigmaFor^2-r2^2
+ERR2=cbind("GARCH(1,1) norm"=err3,"GARCH(1,1) std"=err4)
+plot(ts(ERR2),main="Forcecast's errors")
+err.ind2=matrix(nrow=3,ncol=2)
+colnames(err.ind2)=c("GARCH norm","GARCH std")
+row.names(err.ind2)=c("MSE","RMSE","MAE")
+err.ind2[,1]=c(mean(err3^2),sqrt(mean(err3^2)),mean(abs(err3)))
+err.ind2[,2]=c(mean(err4^2),sqrt(mean(err4^2)),mean(abs(err4)))
+err.ind2
+```
+
+Diebold-Mariano. GARCH std produces significantly better predictions than GARCH norm.
+
+```{r}
+i=j=1
+DM=matrix(nrow=2,ncol=2)
+for (l in 1:4){
+  if (i==j) {
+    DM[l]=NA
+    i=i+1
+  }
+  else {
+    DM[l]=dm_test(ERR[,i],ERR[,j],alternative = "greater",power = 1,varestimator = "NeweyWest")$p.value
+    if (i==2){
+      i=1
+      j=j+1
+    }
+    else{
+      i=i+1
+    }
+  }
+}
+DM
+
+i=j=1
+DM=matrix(nrow=2,ncol=2)
+for (l in 1:4){
+  if (i==j) {
+    DM[l]=NA
+    i=i+1
+  }
+  else {
+    DM[l]=dm_test(ERR2[,i],ERR2[,j],alternative = "greater",power = 1,varestimator = "NeweyWest")$p.value
+    if (i==2){
+      i=1
+      j=j+1
+    }
+    else{
+      i=i+1
+    }
+  }
+}
+DM
+```
+
+## Amplifon - daily
+
+### Prices, log-prices
+
+Refinitiv data from the 2nd of January 2018 to the 28th of February 2025.
+
+```{r}
+Amplifon <- read_excel("Amplifon.xlsx", skip = 29)
+```
+
+Prices and log-prices. Exploration of the series characteristics. Leptokurtosis, slight negative skewness (log-prices) and volatility clustering as expected.
+
+```{r}
+P=xts(Amplifon[,2],order.by=Amplifon$`Exchange Date`,frequency = "daily")
+p=log(P)
+r=na.omit(diff(p))
+basicStats(cbind(P,p))
+par(mfrow=c(3,1))
+plot(P,xlab="Time",ylab="Prices",main="NVIDIA - PRICES")
+plot(p,xlab="Time",ylab="Log-Prices",main="NVIDIA - LOG-PRICES")
+```
+
+ACF/PACF analysis. The plots evidently suggest the presence of a RW stochastic process for both Prices and Log-prices series. ACF show values close to 1 consistently at least until 21 lags; PACF show values close to 1 at the first lag and non-significant values for the remaining ones.
+
+```{r}
+par(mfrow=c(2,2))
+acf.P=acf(P,lag.max = 21)
+pacf.P=pacf(P,lag.max=21)
+acf.p=acf(p,lag.max=21)
+pacf.p=pacf(p,lag.max=21)
+acf.P$acf[21]
+pacf.P$acf[1]
+acf.p$acf[21]
+pacf.p$acf[1]
+```
+
+Augmented Dickey-Fuller tests for unit roots and Ljung-Box on residuals. Presence of one unit root and residuals' absence of correlation confirmed: RW is confirmed.
+
+```{r}
+adf1=adfTest(p,lags=21,type="ct")
+summary(adf1@test$lm)
+#No significant lag.
+
+adf1=adfTest(p,lags=0,type="ct")
+summary(adf1@test$lm)
+#Trend is not significant either.
+
+adf1=adfTest(p,lags=0,type="c")
+summary(adf1@test$lm)
+#Intercept is significant.
+
+adf1
+#Fail to reject H0: log-prices do have at least one unit root. Repeating the procedure on differenced series to verify the presence of other unit roots.
+
+dp=na.omit(diff(p))
+adf2=adfTest(dp,lags=21,type="ct")
+summary(adf2@test$lm)
+#No significant lag.
+
+adf2=adfTest(dp,lags=0,type="ct")
+summary(adf1@test$lm)
+#Trend is not significant either.
+
+adf2=adfTest(dp,lags=0,type="c")
+summary(adf1@test$lm)
+#Intercept is significant.
+
+adf2
+#Reject H0: the presence of one single unit root is confirmed.
+
+par(mfrow=c(1,2))
+acf(dp,lag.max=21)
+pacf(dp,lag.max=21)
+Box.test(dp,lag=21,type="Ljung-Box")
+#ACF and PACF plots are compatible with WN; Ljung-Box fails to reject absence of correlation. RW confirmed.
+```
+
+### Log-returns
+
+Exploratory analysis. BasicStats shows slight negative skewness and high kurtosis, evident volatility clustering and stationarity around 0 (as expected). QQ plot doesn't suggest normality, as does the density plot and Jarque-Bera test, especially in the tails.
+
+```{r}
+r=dp
+BS.2=as.matrix(basicStats(r))
+BS.2
+
+par(mfrow=c(1,3))
+plot(r,xlab="Time",ylab="Log-returns", main="NVIDIA - LOG-RETURNS")
+x=seq(min(r),max(r),length=50)
+y=dnorm(x,mean=mean(r),sd=sd(r))
+hist(r,breaks=100,freq=F,main="NVIDIA's returns")
+lines(x,y,col=2,lwd=2)
+qqnorm(r,main="Normal Q-Q Plot",xlab="Theoretical",ylab="Empirical")
+qqline(r,col="steelblue", lwd=2)
+jarqueberaTest(r)
+```
+
+Plots show ACF and PACF of the log-returns, their squared values and their absolute values, and suggest the presence of some form of non-linear serial dependence. No clear stochastic processes are evidently suggested by the plots of the original log-returns, therefore some ARMA processes are estimated and then evaluated.
+
+```{r}
+par(mfrow=c(2,3))
+r2=r^2
+r.abs=abs(r)
+acf(r,lag.max=12)
+acf(r2,lag.max = 12)
+acf(r.abs,lag.max=12)
+pacf(r,lag.max=12)
+pacf(r2,lag.max=12)
+pacf(r.abs,lag.max=12)
+```
+
+ACF plots already show a WN, an ARMA model is estimated anyway. The best AIC is brought by AR(1) without intercept. In none of the proposed models is shown a significant coefficient, suggesting the right model could be the null one (WN).
+
+```{r}
+ar.int=arma(r,order=c(1,0))
+ar=arma(r,order=c(1,0),include.intercept = F)
+ma.int=arma(r,order=c(0,1))
+ma=arma(r,order=c(0,1),include.intercept = F)
+arma.int=arma(r,order=c(1,1))
+arma=arma(r,order=c(1,1),include.intercept = F)
+par(mfrow=c(2,3))
+acf(na.omit(ar.int$residuals), lag.max=21)
+acf(na.omit(ar$residuals), lag.max=21)
+acf(na.omit(ma.int$residuals), lag.max=21)
+acf(na.omit(ma$residuals), lag.max=21)
+acf(na.omit(arma.int$residuals), lag.max=21)
+acf(na.omit(arma$residuals), lag.max=21)
+
+summary(ar.int)
+summary(ar)
+summary(ma.int)
+summary(ma)
+summary(arma.int)
+summary(arma)
+
+mod.arma=ar
+mod.mean=arma(r,order=c(0,0))
+summary(mod.mean)
+par(mfrow=c(1,2))
+acf(mod.mean$residuals,lag.max=21)
+pacf(mod.mean$residuals,lag.max=21)
+```
+
+Static forecasts.
+
+```{r}
+test.size=250
+train.size=length(r)-250
+test=tail(r,test.size)
+train=head(r,train.size)
+for (i in 1:test.size){
+  if (i==1){
+    new.train=train
+    p.mean=p.ar=c(rep(NA,250))
+    mod.mean=Arima(train,order=c(0,0,0),include.mean = T)
+    mod.arma=Arima(train,order=c(1,0,0),include.mean = F)
+  }
+  else{
+    new.train=c(new.train, test[i-1])
+  }
+  mod.mean.stat=Arima(new.train,model=mod.mean)
+  mod.arma.stat=Arima(new.train,model=mod.arma)
+  p.mean[i]=forecast(mod.mean.stat,h=1)$mean
+  p.ar[i]=forecast(mod.arma.stat,h=1)$mean
+}
+
+test.size=250
+train.size=length(r)-250
+test=tail(r,test.size)
+train=head(r,train.size)
+for (i in 1:test.size){
+  if (i==1){
+    new.train=train
+    p.ar.2=c(rep(NA,250))
+    mod.arma=Arima(train,order=c(1,0,0),include.mean = F)
+  }
+  else{
+    new.train=as.vector(new.train)
+    new.train=c(new.train, p.ar.2[i-1])
+  }
+  mod.arma.din=Arima(new.train,model=mod.arma)
+  p.ar.2[i]=forecast(mod.arma.din,h=1)$mean
+}
+```
+
+As expected (by model metrics and usual characteristics of returns time series) the model doesn't perform well in forecasting, errors look similar to the ones of the intercept model. Diebold-Mariano confirms homogeneity of errors between models.
+
+```{r}
+par(mfrow=c(1,1)) 
+ts.plot(ts(test),ts(p.mean),ts(p.ar),ts(p.ar.2),col=1:3,main="Forecasts comparison") 
+legend("topleft",legend=c("Actual returns","Forecasts mean model","Forecasts AR(1) (static)","Forecasts AR(1) (dynamic)"),col=1:4,lty = 1,  cex=0.70) 
+err.mean=test-p.mean 
+err.ar=test-p.ar 
+err.ar.2=test-p.ar.2
+MSE.mean=mean(err.mean^2) 
+MSE.ar=mean(err.ar^2) 
+MSE.ar.2=mean(err.ar.2^2) 
+MSE.mean 
+MSE.ar 
+MSE.ar.2 
+p1=dm_test(err.ar,err.mean,alternative = "less",h=1)$p.value
+p2=dm_test(err.ar,err.ar.2,alternative = "less",h=1)$p.value
+p3=dm_test(err.ar.2,err.mean,alternative = "less",h=1)$p.value
+p.adjust(c(p1,p2,p3),"holm")
+```
+
+### Volatility
+
+Returns' series doesn't appear homoscedastic: peaks and effects on variance are visible in the following plots.
+
+```{r}
+par(mfrow=c(3,1))
+plot(r,main="Amplifon's daily returns")
+plot(abs(r),main="Absolute returns")
+plot(r^2, main="Squared returns")#Proxy of variance, since mean(r)~0
+var62=roll_var(r,width=62,center=T)
+var126=roll_var(r,width=126,center=T)
+par(mfrow=c(2,1))
+plot(var62,main="Rolling variance with 62 obs window")
+plot(var126,main="Rolling variance with 126 obs window")
+```
+
+H0 is rejected for both LM and Ljung-Box. ARCH effects are confirmed.
+
+```{r}
+ArchTest(r,lags=1)
+ArchTest(r,lags=5)
+ArchTest(r,lags=10)
+Box.test(as.numeric(r^2),lag=5,type ="Ljung-Box")
+Box.test(as.numeric(r^2),lag=10,type="Ljung-Box")
+```
+
+Fitting a GARCH(1,1) as starting model, with both normal and skewed t-Student distribution of innovations.
+
+Normal model:
+
+Optimal coefficients entirely significant and variance's intercept and shock's effect non significant for robust estimates of the normal model. Absence of ARCH effects among residuals. Stability over time for the model's coefficients. Low goodness of fit for normal distribution on innovations.
+
+Sstd model:
+
+Similar results, average returns are no longer significant and goodness of fit improves with sstd.
+
+```{r}
+r1=r[1:1567,]
+r2=r[1568:1819,]
+spec1=ugarchspec(variance.model=list(model="sGARCH",garchOrder=c(1,1)),mean.model = list(armaOrder=c(0,0),include.mean=T),distribution.model = "norm")
+spec2=ugarchspec(variance.model=list(model="sGARCH",garchOrder=c(1,1)),mean.model = list(armaOrder=c(0,0),include.mean=F),distribution.model = "sstd")
+#include.mean=F because of non-significance of mu
+garch11.norm=ugarchfit(spec1,r1)
+garch11.sstd=ugarchfit(spec2,r1)
+show(garch11.norm)
+show(garch11.sstd)
+```
+
+Standardized residuals' analysis. Similar results, sstd fits the data better than normal distribution.
+
+```{r}
+resst.garch11.norm=residuals(garch11.norm,standardize=T)
+resst.garch11.sstd=residuals(garch11.sstd,standardize=T)
+par(mfrow=c(2,1))
+plot(resst.garch11.norm,main="Standardized residuals' analysis - Normal model")
+plot(resst.garch11.sstd,main="Standardized residuals' analysis - Sstd model")
+par(mfrow=c(2,1))
+plot(garch11.norm,which=8)
+plot(garch11.norm,which=9)
+par(mfrow=c(2,1))
+plot(garch11.sstd,which=8)
+plot(garch11.sstd,which=9)
+par(mfrow=c(2,2))
+plot(garch11.norm,which=10)
+plot(garch11.norm,which=11)
+plot(garch11.sstd,which=10)
+plot(garch11.sstd,which=11)
+```
+
+Fitting the GJR-GARCH and E-GARCH models to capture returns' asymmetrical response to shocks.
+
+GJR-GARCH:
+
+Non significant alpha coefficient, but kept anyway to correctly estimate the model. Baseline coefficient of volatility is not significant either with robust standard errors. No residual ARCH effects. Stable coefficients. Sstd doesn't fit well in this case.
+
+E-GARCH:
+
+Significant coefficients. No residual ARCH effects. Stable coefficients. SStd still doesn't fit optimally.
+
+```{r}
+spec3=ugarchspec(variance.model=list(model="gjrGARCH",garchOrder=c(1,1)),mean.model = list(armaOrder=c(0,0),include.mean=F),distribution.model = "sstd")
+spec4=ugarchspec(variance.model=list(model="eGARCH",garchOrder=c(1,2)),mean.model = list(armaOrder=c(0,0),include.mean=F),distribution.model = "sstd")
+#mu is not significant
+gjrgarch11.sstd=ugarchfit(spec3,r1)
+egarch12.sstd=ugarchfit(spec4,r1)
+show(gjrgarch11.sstd)
+show(egarch12.sstd)
+```
+
+Standardized residuals' analysis. Similar results.
+
+```{r}
+resst.gjrgarch11.sstd=residuals(gjrgarch11.sstd,standardize=T)
+resst.egarch12.sstd=residuals(egarch12.sstd,standardize=T)
+par(mfrow=c(2,1))
+plot(resst.gjrgarch11.sstd,main="Standardized residuals' analysis - Normal model")
+plot(resst.egarch12.sstd,main="Standardized residuals' analysis - Sstd model")
+par(mfrow=c(2,1))
+plot(gjrgarch11.sstd,which=8)
+plot(gjrgarch11.sstd,which=9)
+par(mfrow=c(2,1))
+plot(egarch12.sstd,which=8)
+plot(egarch12.sstd,which=9)
+par(mfrow=c(2,2))
+plot(gjrgarch11.sstd,which=10)
+plot(gjrgarch11.sstd,which=11)
+plot(egarch12.sstd,which=10)
+plot(egarch12.sstd,which=11)
+```
+
+Similar fitted values for sigma, the bigger differences between plots sit in the "sharpness" of peaks. Volatility clustering is correctly recognized.
+
+```{r}
+sigma1=sigma(garch11.norm)
+sigma2=sigma(garch11.sstd)
+sigma3=sigma(egarch12.sstd)
+sigma4=sigma(gjrgarch11.sstd)
+par(mfrow=c(2,2))
+plot(sigma1,main="GARCH(1,1) norm")
+plot(sigma2,main="GARCH(1,1) sstd")
+plot(sigma3,main="EGARCH(1,2) sstd")
+plot(sigma4,main="GJR-GARCH(1,1) sstd")
+```
+
+Information Criteria. The first model shows the poorest results in information criteria, whereas the fourth one shows the best ones.
+
+```{r}
+AIC=c(infocriteria(garch11.norm)[1],infocriteria(garch11.sstd)[1],infocriteria(egarch12.sstd)[1],infocriteria(gjrgarch11.sstd)[1])
+BIC=c(infocriteria(garch11.norm)[2],infocriteria(garch11.sstd)[2],infocriteria(egarch12.sstd)[2],infocriteria(gjrgarch11.sstd)[2])
+SHI=c(infocriteria(garch11.norm)[3],infocriteria(garch11.sstd)[3],infocriteria(egarch12.sstd)[3],infocriteria(gjrgarch11.sstd)[3])
+HQC=c(infocriteria(garch11.norm)[4],infocriteria(garch11.sstd)[4],infocriteria(egarch12.sstd)[4],infocriteria(gjrgarch11.sstd)[4])
+
+par(mfrow=c(2,2))
+plot(AIC)
+plot(BIC)
+plot(SHI)
+plot(HQC)
+
+```
+
+Log-likelihood evaluation. Results compatible with previous analysis.
+
+```{r}
+loglik=c(garch11.norm@fit$LLH,garch11.sstd@fit$LLH,egarch12.sstd@fit$LLH,gjrgarch11.sstd@fit$LLH)
+par(mfrow=c(1,1))
+plot(loglik)
+```
+
+Static and dynamic forecasts.
+
+```{r}
+for1=ugarchroll(spec1,data=r1,forecast.length = length(r2),refit.every = 5)
+for2=ugarchroll(spec2,data=r1,forecast.length = length(r2),refit.every = 5)
+for3=ugarchroll(spec3,data=r1,forecast.length = length(r2),refit.every = 5)
+for4=ugarchroll(spec4,data=r1,forecast.length = length(r2),refit.every = 5)
+forec=cbind("GARCH(1,1) norm"=as.data.frame(for1)$Sigma,"GARCH(1,1) sstd"=as.data.frame(for2)$Sigma,"E-GARCH(1,2) sstd"=as.data.frame(for3)$Sigma,"GJR-GARCH(1,1) sstd"=as.data.frame(for4)$Sigma)
+plot(ts(forec),main="Static Forecasts")
+for5=ugarchforecast(garch11.norm,data=r1,n.ahead = length(r2))
+for6=ugarchforecast(garch11.sstd,data=r1,n.ahead = length(r2))
+for7=ugarchforecast(egarch12.sstd,data=r1,n.ahead = length(r2))
+for8=ugarchforecast(gjrgarch11.sstd,data=r1,n.ahead = length(r2))
+forec2=cbind("GARCH(1,1) norm"=sigma(for5),"GARCH(1,1) sstd"=sigma(for6),"E-GARCH(1,2) sstd"=sigma(for7),"GJR-GARCH(1,1) sstd"=sigma(for8))
+plot(ts(forec2),main="Dynamic Forecasts")
+```
+
+Visualization.
+
+```{r}
+par(mfrow=c(2,2))
+plot(for1,which=1)
+plot(for2,which=1)
+plot(for3,which=1)
+plot(for4,which=1)
+par(mfrow=c(2,2))
+plot(for1,which=2)
+plot(for2,which=2)
+plot(for3,which=2)
+plot(for4,which=2)
+par(mfrow=c(2,2))
+plot(for1,which=3)
+plot(for2,which=3)
+plot(for3,which=3)
+plot(for4,which=3)
+par(mfrow=c(2,2))
+plot(for1,which=4)
+plot(for2,which=4)
+plot(for3,which=4)
+plot(for4,which=4)
+plot(for1,which=5)
+plot(for2,which=5)
+plot(for3,which=5)
+plot(for4,which=5)
+plot(for5,which=1)
+plot(for6,which=1)
+plot(for7,which=1)
+plot(for8,which=1)
+plot(for5,which=3)
+plot(for6,which=3)
+plot(for7,which=3)
+plot(for8,which=3)
+```
+
+Forecast errors analysis. EGARCH shows the best results for static forecasts; in dynamic forecasts GJRGARCH shows lower errors too.
+
+```{r}
+err1=as.data.frame(for1)$Sigma^2-r2^2
+err2=as.data.frame(for2)$Sigma^2-r2^2
+err3=as.data.frame(for3)$Sigma^2-r2^2
+err4=as.data.frame(for4)$Sigma^2-r2^2
+ERR=cbind("GARCH(1,1) norm"=err1,"GARCH(1,1) sstd"=err2,"E-GARCH(1,2) sstd"=err3,"GJR-GARCH(1,1) sstd"=err4)
+plot(ts(ERR),main="Forcecast's errors")
+err.ind=matrix(nrow=3,ncol=4)
+colnames(err.ind)=c("GARCH norm","GARCH sstd", "E-GARCH sstd", "GJR-GARCH sstd")
+row.names(err.ind)=c("MSE","RMSE","MAE")
+err.ind[,1]=c(mean(err1^2),sqrt(mean(err1^2)),mean(abs(err1)))
+err.ind[,2]=c(mean(err2^2),sqrt(mean(err2^2)),mean(abs(err2)))
+err.ind[,3]=c(mean(err3^2),sqrt(mean(err3^2)),mean(abs(err3)))
+err.ind[,4]=c(mean(err4^2),sqrt(mean(err4^2)),mean(abs(err4)))
+err.ind
+
+err5=for5@forecast$sigmaFor^2-r2^2
+err6=for6@forecast$sigmaFor^2-r2^2
+err7=for7@forecast$sigmaFor^2-r2^2
+err8=for8@forecast$sigmaFor^2-r2^2
+ERR2=cbind("GARCH(1,1) norm"=err5,"GARCH(1,1) sstd"=err6,"E-GARCH(1,2) sstd"=err7,"GJR-GARCH(1,1) sstd"=err8)
+plot(ts(ERR2),main="Forcecast's errors")
+err.ind2=matrix(nrow=3,ncol=4)
+colnames(err.ind2)=c("GARCH norm","GARCH sstd", "E-GARCH sstd", "GJR-GARCH sstd")
+row.names(err.ind2)=c("MSE","RMSE","MAE")
+err.ind2[,1]=c(mean(err5^2),sqrt(mean(err5^2)),mean(abs(err5)))
+err.ind2[,2]=c(mean(err6^2),sqrt(mean(err6^2)),mean(abs(err6)))
+err.ind2[,3]=c(mean(err7^2),sqrt(mean(err7^2)),mean(abs(err7)))
+err.ind2[,4]=c(mean(err8^2),sqrt(mean(err8^2)),mean(abs(err8)))
+err.ind2
+```
+
+Diebold-Mariano. EGARCH shows significantly lower error rates (in comparison with alternatives) in static forecasts. EGARCH and GJRGARCH show significantly more accurate forecasts when compared to the alternatives.
+
+```{r}
+i=j=1
+DM=matrix(nrow=4,ncol=4)
+for (l in 1:16){
+  if (i==j) {
+    DM[l]=NA
+    i=i+1
+  }
+  else {
+    DM[l]=dm_test(ERR[,i],ERR[,j],alternative = "greater",power = 1,varestimator = "NeweyWest")$p.value
+    if (i==4){
+      i=1
+      j=j+1
+    }
+    else{
+      i=i+1
+    }
+  }
+}
+DM
+
+i=j=1
+DM=matrix(nrow=4,ncol=4)
+for (l in 1:16){
+  if (i==j) {
+    DM[l]=NA
+    i=i+1
+  }
+  else {
+    DM[l]=dm_test(ERR2[,i],ERR2[,j],alternative = "greater",power = 1,varestimator = "NeweyWest")$p.value
+    if (i==4){
+      i=1
+      j=j+1
+    }
+    else{
+      i=i+1
+    }
+  }
+}
+DM
+```
